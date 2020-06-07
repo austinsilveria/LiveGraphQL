@@ -15,6 +15,7 @@ type Request struct {
     value map[string]string
     fields map[string]bool
     newRing *[100]*NodeMembership
+    isReplica bool
     isRehash bool
     kill bool
 }
@@ -47,39 +48,47 @@ func main() {
     addNode(&ring)
     addNode(&ring)
     addNode(&ring)
-    output := ""
-    for i, n := range ring {
-        if n != nil {
-            output = output + strconv.Itoa(i) + " "
-        }
-    }
-    fmt.Println("Ring: ", output)
-    put("Maria", map[string]string{"balance": "100"}, &ring)
-    put("John", map[string]string{"balance": "80"}, &ring)
-    put("Anna", map[string]string{"balance": "40"}, &ring)
-    put("Tim", map[string]string{"balance": "20"}, &ring)
-    put("Alex", map[string]string{"balance": "60"}, &ring)
-    get("Maria", &ring)
-    get("John", &ring)
-    get("Anna", &ring)
-    get("Tim", &ring)
-    get("Alex", &ring)
-    deleteNode(&ring, 81)
-    time.Sleep(time.Duration(10) * time.Second)
-    get("Maria", &ring)
-    get("John", &ring)
-    get("Anna", &ring)
-    get("Tim", &ring)
-    get("Alex", &ring)
-    stream("Maria", map[string]bool{"accountType": true, "balance": true}, &ring)
-    put("Maria", map[string]string{"accountType": "gold"}, &ring)
+    printRing(&ring)
+    fmt.Println()
+
+    put("Alice", map[string]string{"accountType": "gold", "balance": "100", "name": "Alice"}, &ring)
+    put("Bob", map[string]string{"accountType": "silver", "balance": "80", "name": "Bob"}, &ring)
+    fmt.Println()
+
+    get("Alice", &ring)
+    get("Bob", &ring)
+    fmt.Println()
+
+    stream("Alice", map[string]bool{"balance": true}, &ring)
+    stream("Bob", map[string]bool{"accountType": true, "balance": true, "name": true}, &ring)
+    fmt.Println()
+
+    put("Alice", map[string]string{"balance": "110"}, &ring)
+    put("Alice", map[string]string{"balance": "121"}, &ring)
+    put("Alice", map[string]string{"balance": "133.1"}, &ring)
+    put("Alice", map[string]string{"accountType": "platinum"}, &ring)
+    time.Sleep(time.Duration(2) * time.Second)
+    fmt.Println()
+
     addNode(&ring)
-    time.Sleep(time.Duration(5) * time.Second)
-    get("Maria", &ring)
-    get("John", &ring)
-    get("Anna", &ring)
-    get("Tim", &ring)
-    get("Alex", &ring)
+    printRing(&ring)
+    fmt.Println()
+
+    put("Bob", map[string]string{"balance": "72"}, &ring)
+    put("Bob", map[string]string{"balance": "64.8"}, &ring)
+    put("Bob", map[string]string{"balance": "58.32"}, &ring)
+    put("Bob", map[string]string{"accountType": "bronze"}, &ring)
+    time.Sleep(time.Duration(2) * time.Second)
+    fmt.Println()
+
+    deleteNode(&ring, 40)
+    printRing(&ring)
+    time.Sleep(time.Duration(10) * time.Second)
+    fmt.Println()
+
+    get("Alice", &ring)
+    get("Bob", &ring)
+    fmt.Println()
 }
 
 // Stream updates to a key
@@ -142,6 +151,7 @@ func putHashed(key int, value map[string]string, ring *[100]*NodeMembership, isR
     request.requestType = "put"
     request.key = key
     request.value = value
+    request.isReplica = false
     request.isRehash = isRehash
 
     blacklist := make(map[int]bool)
@@ -156,6 +166,7 @@ func putHashed(key int, value map[string]string, ring *[100]*NodeMembership, isR
             for k, _ := range nodeMembership.virtualAddresses {
                 blacklist[k] = true
             }
+            request.isReplica = true
         }
         pos = (pos + 1) % len(ring)
 
@@ -198,28 +209,39 @@ func addNode(ring *[100]*NodeMembership) {
         newNodeState.ring[i] = nodeMembership
     }
 
-    fmt.Println("Adding: ", newNodeMembership.virtualAddresses)
+    fmt.Println("Adding node: ", newNodeMembership.virtualAddresses)
     go startNode(&newNodeState)
 
-    // Rehash next numReplicas - 1 nodes
-    numReplicas := 3
-    for address, _ := range newNodeMembership.virtualAddresses {
-        pos := (address + 1) % len(ring)
-        left := numReplicas - 1
-        for {
-            if _, contains := newNodeMembership.virtualAddresses[pos]; !contains && ring[pos] != nil {
-                var request Request
-                request.requestType = "rehash"
-                request.newRing = ring
-                ring[pos].requestReceiver <- request
-                left -= 1
-            }
-            pos = (pos + 1) % len(ring)
-            if left <= 0 || pos == address {
-                break
+    go func() {
+        time.Sleep(time.Duration(2) * time.Second)
+
+        blacklist := make(map[int]bool)
+        for k, _ := range newNodeMembership.virtualAddresses {
+            blacklist[k] = true
+        }
+        // Rehash next numReplicas - 1 nodes
+        numReplicas := 3
+        for address, _ := range newNodeMembership.virtualAddresses {
+            pos := (address + 1) % len(ring)
+            left := numReplicas - 1
+            for {
+                if _, contains := blacklist[pos]; !contains && ring[pos] != nil {
+                    for k, _ := range ring[pos].virtualAddresses {
+                        blacklist[k] = true
+                    }
+                    var request Request
+                    request.requestType = "rehash"
+                    request.newRing = ring
+                    ring[pos].requestReceiver <- request
+                    left -= 1
+                }
+                pos = (pos + 1) % len(ring)
+                if left <= 0 || pos == address {
+                    break
+                }
             }
         }
-    }
+    }()
 }
 
 func deleteNode(ring *[100]*NodeMembership, choice int) {
@@ -237,7 +259,7 @@ func deleteNode(ring *[100]*NodeMembership, choice int) {
     var request Request
     request.requestType = "kill"
     ring[choice].requestReceiver <- request
-    fmt.Println("Failing: ", ring[choice].virtualAddresses)
+    fmt.Println("Node failing: ", ring[choice].virtualAddresses)
     for virtualAddress, _ := range ring[choice].virtualAddresses {
         ring[virtualAddress] = nil
     }
@@ -255,14 +277,18 @@ func startNode(nodeState *NodeState) {
                     request.returnChan <- nodeState.store[request.key]
                 case "stream":
                     cur := nodeState.store[request.key]
+                    newObj := make(map[string]string)
                     // If key exists, update fields present in request
                     if cur != nil {
+                        for k, v := range cur {
+                            newObj[k] = v
+                        }
                         keys := make([]string, 0, len(request.fields))
                         for k := range request.fields {
                             keys = append(keys, k)
                         }
-                        cur["stream"] = strings.Join(keys, ",")
-                        nodeState.store[request.key] = cur
+                        newObj["stream"] = strings.Join(keys, ",")
+                        nodeState.store[request.key] = newObj
                     } else {
                     	fmt.Println("Key does not exist, not streaming.")
                     }
@@ -271,17 +297,21 @@ func startNode(nodeState *NodeState) {
                         delete(nodeState.store, request.key)
                     } else {
                         cur := nodeState.store[request.key]
+                        newObj := make(map[string]string)
                         // If key exists, update fields present in request
                         if cur != nil {
-                            for k, v := range request.value {
-                                cur[k] = v
+                            for k, v := range cur {
+                                newObj[k] = v
                             }
-                            nodeState.store[request.key] = cur
+                            for k, v := range request.value {
+                                newObj[k] = v
+                            }
+                            nodeState.store[request.key] = newObj
                         } else {
                             nodeState.store[request.key] = request.value
                         }
 
-                        if v, contains := cur["stream"]; contains && !request.isRehash {
+                        if v, contains := newObj["stream"]; contains && !request.isReplica && !request.isRehash {
                             streamFields := make(map[string]bool)
                             for _, field := range strings.Split(v, ",") {
                                 streamFields[field] = true
@@ -296,7 +326,7 @@ func startNode(nodeState *NodeState) {
 
                             if streamUpdate {
                                 stream := make(map[string]string)
-                                for k, v := range cur {
+                                for k, v := range newObj {
                                     if _, streamUpdated := streamFields[k]; streamUpdated {
                                         stream[k] = v
                                     }
@@ -422,7 +452,11 @@ func mergeRings(nodeState *NodeState, receivedRing [100]*NodeMembership) [100]*N
     }
 
     if failureState.rehash {
-        rehash(nodeState, &newRing)
+        // Send request to rehash itself--added to end of request queue
+        var request Request
+        request.requestType = "rehash"
+        request.newRing = &newRing
+        nodeState.membership.requestReceiver <- request
     }
 
     return newRing
@@ -484,6 +518,16 @@ func maxTime(a, b time.Time) time.Time {
         return a
     }
     return b
+}
+
+func printRing(ring *[100]*NodeMembership) {
+    output := ""
+    for i, n := range ring {
+        if n != nil {
+            output = output + strconv.Itoa(i) + " "
+        }
+    }
+    fmt.Println("Ring: ", output)
 }
 
 func printNode(nodeState *NodeState) {
