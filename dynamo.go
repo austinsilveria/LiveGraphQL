@@ -14,6 +14,8 @@ type Request struct {
     key int
     value map[string]string
     fields map[string]bool
+    newRing *[100]*NodeMembership
+    isRehash bool
     kill bool
 }
 
@@ -69,34 +71,39 @@ func main() {
     get("Anna", &ring)
     get("Tim", &ring)
     get("Alex", &ring)
+    stream("Maria", map[string]bool{"accountType": true, "balance": true}, &ring)
+    put("Maria", map[string]string{"accountType": "gold"}, &ring)
+    addNode(&ring)
+    time.Sleep(time.Duration(5) * time.Second)
+    get("Maria", &ring)
+    get("John", &ring)
+    get("Anna", &ring)
+    get("Tim", &ring)
+    get("Alex", &ring)
 }
 
 // Stream updates to a key
-// func stream(key string, fields map[string]bool, ring *[100]*NodeMembership) {
-//     hashKey := hash(key)
-//
-//     var request Request
-//     request.requestType = "stream"
-//     request.key = hashKey
-//     request.fields = fields
-//     request.returnChan = make(chan map[string]string, 1)
-//
-//     pos := hashKey
-//     for {
-//         nodeMembership := ring[pos]
-//         if nodeMembership != nil {
-//             nodeMembership.requestReceiver <- request
-//             break
-//         } else {
-//             pos = (pos + 1) % len(ring)
-//         }
-//     }
-//
-//     value := <- request.returnChan
-//     close(request.returnChan)
-//     fmt.Println("Got " + key + " from " + strconv.Itoa(pos) + ": ", value)
-//     return pos, value
-// }
+func stream(key string, fields map[string]bool, ring *[100]*NodeMembership) {
+    fmt.Println("Streaming these fields from " + key + ": ", fields)
+
+    hashKey := hash(key)
+
+    var request Request
+    request.requestType = "stream"
+    request.key = hashKey
+    request.fields = fields
+
+    pos := hashKey
+    for {
+        nodeMembership := ring[pos]
+        if nodeMembership != nil {
+            nodeMembership.requestReceiver <- request
+            break
+        } else {
+            pos = (pos + 1) % len(ring)
+        }
+    }
+}
 
 // Return node address and value
 func get(key string, ring *[100]*NodeMembership) (int, map[string]string) {
@@ -127,14 +134,15 @@ func get(key string, ring *[100]*NodeMembership) (int, map[string]string) {
 func put(key string, value map[string]string, ring *[100]*NodeMembership) {
     hashKey := hash(key)
     fmt.Println("Putting: " + key + ": ", value)
-    putHashed(hashKey, value, ring)
+    putHashed(hashKey, value, ring, false)
 }
 
-func putHashed(key int, value map[string]string, ring *[100]*NodeMembership) {
+func putHashed(key int, value map[string]string, ring *[100]*NodeMembership, isRehash bool) {
     var request Request
     request.requestType = "put"
     request.key = key
     request.value = value
+    request.isRehash = isRehash
 
     blacklist := make(map[int]bool)
     pos := key
@@ -190,7 +198,28 @@ func addNode(ring *[100]*NodeMembership) {
         newNodeState.ring[i] = nodeMembership
     }
 
+    fmt.Println("Adding: ", newNodeMembership.virtualAddresses)
     go startNode(&newNodeState)
+
+    // Rehash next numReplicas - 1 nodes
+    numReplicas := 3
+    for address, _ := range newNodeMembership.virtualAddresses {
+        pos := (address + 1) % len(ring)
+        left := numReplicas - 1
+        for {
+            if _, contains := newNodeMembership.virtualAddresses[pos]; !contains && ring[pos] != nil {
+                var request Request
+                request.requestType = "rehash"
+                request.newRing = ring
+                ring[pos].requestReceiver <- request
+                left -= 1
+            }
+            pos = (pos + 1) % len(ring)
+            if left <= 0 || pos == address {
+                break
+            }
+        }
+    }
 }
 
 func deleteNode(ring *[100]*NodeMembership, choice int) {
@@ -204,7 +233,7 @@ func deleteNode(ring *[100]*NodeMembership, choice int) {
         }
     }
 
-    // Kill node
+    // Simulate node failing
     var request Request
     request.requestType = "kill"
     ring[choice].requestReceiver <- request
@@ -224,13 +253,61 @@ func startNode(nodeState *NodeState) {
             switch requestType := request.requestType; requestType {
                 case "get":
                     request.returnChan <- nodeState.store[request.key]
+                case "stream":
+                    cur := nodeState.store[request.key]
+                    // If key exists, update fields present in request
+                    if cur != nil {
+                        keys := make([]string, 0, len(request.fields))
+                        for k := range request.fields {
+                            keys = append(keys, k)
+                        }
+                        cur["stream"] = strings.Join(keys, ",")
+                        nodeState.store[request.key] = cur
+                    } else {
+                    	fmt.Println("Key does not exist, not streaming.")
+                    }
                 case "put":
                     if len(request.value) == 0 {
                         delete(nodeState.store, request.key)
                     } else {
-                        nodeState.store[request.key] = request.value
+                        cur := nodeState.store[request.key]
+                        // If key exists, update fields present in request
+                        if cur != nil {
+                            for k, v := range request.value {
+                                cur[k] = v
+                            }
+                            nodeState.store[request.key] = cur
+                        } else {
+                            nodeState.store[request.key] = request.value
+                        }
+
+                        if v, contains := cur["stream"]; contains && !request.isRehash {
+                            streamFields := make(map[string]bool)
+                            for _, field := range strings.Split(v, ",") {
+                                streamFields[field] = true
+                            }
+
+                            streamUpdate := false
+                            for k, _ := range request.value {
+                                if _, streamUpdated := streamFields[k]; streamUpdated {
+                                    streamUpdate = true
+                                }
+                            }
+
+                            if streamUpdate {
+                                stream := make(map[string]string)
+                                for k, v := range cur {
+                                    if _, streamUpdated := streamFields[k]; streamUpdated {
+                                        stream[k] = v
+                                    }
+                                }
+                                // Real implementation would send stream update to message queue (i.e. SNS/SQS on AWS)
+                                fmt.Println("Streamed "+ strconv.Itoa(request.key) + "(hashed key) update : ", stream)
+                            }
+                        }
                     }
-                    nodeState.store[request.key] = request.value
+                case "rehash":
+                    rehash(nodeState, request.newRing)
                 case "kill":
                     nodeState.failed = true
                     break Loop
@@ -345,20 +422,24 @@ func mergeRings(nodeState *NodeState, receivedRing [100]*NodeMembership) [100]*N
     }
 
     if failureState.rehash {
-        // In real implementation, hashKeys would be sorted so rehash would only
-        // be over hashKeys in failure region
-        oldTable := make(map[int]map[string]string)
-        for key, value := range nodeState.store {
-            oldTable[key] = value
-        }
-
-        nodeState.store = make(map[int]map[string]string)
-        for key, value := range oldTable {
-            putHashed(key, value, &(newRing))
-        }
+        rehash(nodeState, &newRing)
     }
 
     return newRing
+}
+
+func rehash(nodeState *NodeState, newRing *[100]*NodeMembership) {
+    // In real implementation, hashKeys would be sorted so rehash would only
+    // be over hashKeys in failure region
+    oldTable := make(map[int]map[string]string)
+    for key, value := range nodeState.store {
+        oldTable[key] = value
+    }
+
+    nodeState.store = make(map[int]map[string]string)
+    for key, value := range oldTable {
+        putHashed(key, value, newRing, true)
+    }
 }
 
 func checkFailureAndAdd(i int, nodeMembership *NodeMembership, deleteAfter time.Duration, newRing *[100]*NodeMembership, nodeState *NodeState, failureState *FailureState) {
