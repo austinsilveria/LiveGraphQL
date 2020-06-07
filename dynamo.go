@@ -10,9 +10,10 @@ import "encoding/binary"
 
 type Request struct {
     requestType string
-    returnChan chan string
+    returnChan chan map[string]string
     key int
-    value string
+    value map[string]string
+    fields map[string]bool
     kill bool
 }
 
@@ -27,7 +28,7 @@ type NodeMembership struct {
 type NodeState struct {
     membership *NodeMembership
     ring [100]*NodeMembership
-    store map[int]string
+    store map[int]map[string]string
     failed bool
 }
 
@@ -51,11 +52,11 @@ func main() {
         }
     }
     fmt.Println("Ring: ", output)
-    put("Maria", "100", &ring)
-    put("John", "20", &ring)
-    put("Anna", "40", &ring)
-    put("Tim", "100", &ring)
-    put("Alex", "10", &ring)
+    put("Maria", map[string]string{"balance": "100"}, &ring)
+    put("John", map[string]string{"balance": "80"}, &ring)
+    put("Anna", map[string]string{"balance": "40"}, &ring)
+    put("Tim", map[string]string{"balance": "20"}, &ring)
+    put("Alex", map[string]string{"balance": "60"}, &ring)
     get("Maria", &ring)
     get("John", &ring)
     get("Anna", &ring)
@@ -70,14 +71,41 @@ func main() {
     get("Alex", &ring)
 }
 
+// Stream updates to a key
+// func stream(key string, fields map[string]bool, ring *[100]*NodeMembership) {
+//     hashKey := hash(key)
+//
+//     var request Request
+//     request.requestType = "stream"
+//     request.key = hashKey
+//     request.fields = fields
+//     request.returnChan = make(chan map[string]string, 1)
+//
+//     pos := hashKey
+//     for {
+//         nodeMembership := ring[pos]
+//         if nodeMembership != nil {
+//             nodeMembership.requestReceiver <- request
+//             break
+//         } else {
+//             pos = (pos + 1) % len(ring)
+//         }
+//     }
+//
+//     value := <- request.returnChan
+//     close(request.returnChan)
+//     fmt.Println("Got " + key + " from " + strconv.Itoa(pos) + ": ", value)
+//     return pos, value
+// }
+
 // Return node address and value
-func get(key string, ring *[100]*NodeMembership) (int, string) {
+func get(key string, ring *[100]*NodeMembership) (int, map[string]string) {
     hashKey := hash(key)
 
     var request Request
     request.requestType = "get"
     request.key = hashKey
-    request.returnChan = make(chan string, 1)
+    request.returnChan = make(chan map[string]string, 1)
 
     pos := hashKey
     for {
@@ -92,17 +120,17 @@ func get(key string, ring *[100]*NodeMembership) (int, string) {
 
     value := <- request.returnChan
     close(request.returnChan)
-    fmt.Println("Got " + key + " from " + strconv.Itoa(pos) + ": " + value)
+    fmt.Println("Got " + key + " from " + strconv.Itoa(pos) + ": ", value)
     return pos, value
 }
 
-func put(key string, value string, ring *[100]*NodeMembership) {
+func put(key string, value map[string]string, ring *[100]*NodeMembership) {
     hashKey := hash(key)
-    fmt.Println("Putting: " + key + ": " + value)
+    fmt.Println("Putting: " + key + ": ", value)
     putHashed(hashKey, value, ring)
 }
 
-func putHashed(key int, value string, ring *[100]*NodeMembership) {
+func putHashed(key int, value map[string]string, ring *[100]*NodeMembership) {
     var request Request
     request.requestType = "put"
     request.key = key
@@ -139,7 +167,7 @@ func addNode(ring *[100]*NodeMembership) {
                                         time.Now()}
     newNodeState := NodeState{&newNodeMembership,
                               newRing,
-                              make(map[int]string),
+                              make(map[int]map[string]string),
                               false}
     numVirtualNodes := 4
 
@@ -197,7 +225,7 @@ func startNode(nodeState *NodeState) {
                 case "get":
                     request.returnChan <- nodeState.store[request.key]
                 case "put":
-                    if request.value == "" {
+                    if len(request.value) == 0 {
                         delete(nodeState.store, request.key)
                     } else {
                         nodeState.store[request.key] = request.value
@@ -319,12 +347,12 @@ func mergeRings(nodeState *NodeState, receivedRing [100]*NodeMembership) [100]*N
     if failureState.rehash {
         // In real implementation, hashKeys would be sorted so rehash would only
         // be over hashKeys in failure region
-        oldTable := make(map[int]string)
+        oldTable := make(map[int]map[string]string)
         for key, value := range nodeState.store {
             oldTable[key] = value
         }
 
-        nodeState.store = make(map[int]string)
+        nodeState.store = make(map[int]map[string]string)
         for key, value := range oldTable {
             putHashed(key, value, &(newRing))
         }
