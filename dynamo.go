@@ -70,15 +70,15 @@ func main() {
     time.Sleep(time.Duration(2) * time.Second)
     fmt.Println()
 
-    addNode(&ring)
-    printRing(&ring)
-    fmt.Println()
-
     put("Bob", map[string]string{"balance": "72"}, &ring)
     put("Bob", map[string]string{"balance": "64.8"}, &ring)
     put("Bob", map[string]string{"balance": "58.32"}, &ring)
     put("Bob", map[string]string{"accountType": "bronze"}, &ring)
     time.Sleep(time.Duration(2) * time.Second)
+    fmt.Println()
+
+    addNode(&ring)
+    printRing(&ring)
     fmt.Println()
 
     deleteNode(&ring, 40)
@@ -117,26 +117,34 @@ func stream(key string, fields map[string]bool, ring *[100]*NodeMembership) {
 // Return node address and value
 func get(key string, ring *[100]*NodeMembership) (int, map[string]string) {
     hashKey := hash(key)
+    numReplicas := 3
 
     var request Request
     request.requestType = "get"
     request.key = hashKey
-    request.returnChan = make(chan map[string]string, 1)
+    request.returnChan = make(chan map[string]string, numReplicas)
 
+    blacklist := make(map[int]bool)
     pos := hashKey
+    var value map[string]string
     for {
         nodeMembership := ring[pos]
-        if nodeMembership != nil {
+        // Replicas on distinct nodes
+        if _, contains := blacklist[pos]; !contains && nodeMembership != nil {
             nodeMembership.requestReceiver <- request
+            numReplicas = numReplicas - 1
+            for k, _ := range nodeMembership.virtualAddresses {
+                blacklist[k] = true
+            }
+            value = <-request.returnChan
+            fmt.Println("Got "+key+" from "+strconv.Itoa(pos)+": ", value)
+        }
+        pos = (pos + 1) % len(ring)
+
+        if numReplicas == 0 {
             break
-        } else {
-            pos = (pos + 1) % len(ring)
         }
     }
-
-    value := <- request.returnChan
-    close(request.returnChan)
-    fmt.Println("Got " + key + " from " + strconv.Itoa(pos) + ": ", value)
     return pos, value
 }
 
@@ -212,36 +220,32 @@ func addNode(ring *[100]*NodeMembership) {
     fmt.Println("Adding node: ", newNodeMembership.virtualAddresses)
     go startNode(&newNodeState)
 
-    go func() {
-        time.Sleep(time.Duration(2) * time.Second)
-
-        blacklist := make(map[int]bool)
-        for k, _ := range newNodeMembership.virtualAddresses {
-            blacklist[k] = true
-        }
-        // Rehash next numReplicas - 1 nodes
-        numReplicas := 3
-        for address, _ := range newNodeMembership.virtualAddresses {
-            pos := (address + 1) % len(ring)
-            left := numReplicas - 1
-            for {
-                if _, contains := blacklist[pos]; !contains && ring[pos] != nil {
-                    for k, _ := range ring[pos].virtualAddresses {
-                        blacklist[k] = true
-                    }
-                    var request Request
-                    request.requestType = "rehash"
-                    request.newRing = ring
-                    ring[pos].requestReceiver <- request
-                    left -= 1
+    blacklist := make(map[int]bool)
+    for k, _ := range newNodeMembership.virtualAddresses {
+        blacklist[k] = true
+    }
+    // Rehash next numReplicas - 1 nodes
+    numReplicas := 3
+    for address, _ := range newNodeMembership.virtualAddresses {
+        pos := (address + 1) % len(ring)
+        left := numReplicas - 1
+        for {
+            if _, contains := blacklist[pos]; !contains && ring[pos] != nil {
+                for k, _ := range ring[pos].virtualAddresses {
+                    blacklist[k] = true
                 }
-                pos = (pos + 1) % len(ring)
-                if left <= 0 || pos == address {
-                    break
-                }
+                var request Request
+                request.requestType = "rehash"
+                request.newRing = ring
+                ring[pos].requestReceiver <- request
+                left -= 1
+            }
+            pos = (pos + 1) % len(ring)
+            if left <= 0 || pos == address {
+                break
             }
         }
-    }()
+    }
 }
 
 func deleteNode(ring *[100]*NodeMembership, choice int) {
