@@ -249,7 +249,6 @@ func addNode(ring *[100]*NodeMembership) {
 }
 
 func deleteNode(ring *[100]*NodeMembership, choice int) {
-//     choice := rand.Intn(len(ring))
     // Walk ring until first node found
     for {
         if ring[choice] != nil {
@@ -362,7 +361,6 @@ func manageMembership(nodeState *NodeState) {
             time.Sleep(increaseHbTime)
             nodeState.membership.hbCount = nodeState.membership.hbCount + 1
             nodeState.membership.time = time.Now()
-//             printNode(nodeState)
         }
     }()
 
@@ -468,7 +466,9 @@ func mergeRings(nodeState *NodeState, receivedRing [100]*NodeMembership) [100]*N
 
 func rehash(nodeState *NodeState, newRing *[100]*NodeMembership) {
     // In real implementation, hashKeys would be sorted so rehash would only
-    // be over hashKeys in failure region
+    // be over hashKeys in failure region. Real implementation would also need
+    // method of rehashing concurrently with new writes coming in to avoid
+    // overwriting new data.
     oldTable := make(map[int]map[string]string)
     for key, value := range nodeState.store {
         oldTable[key] = value
