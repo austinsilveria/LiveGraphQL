@@ -2,11 +2,7 @@
 go run dynamo.go
 
 ### Output
-1. Prints active virtual nodes in the ring after adding 5 physical nodes
-2. Prints key-vale puts
-3. Prints getting keys before server failure
-4. Fails server (map contains all virtual nodes of that physical node)
-5. Prints getting keys after server failure
+Prints database operations and streamed live queries.
 
 ### Implementation
 1. Gossip membership
